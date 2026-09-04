@@ -1,0 +1,40 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / Nuxt
+apps/web/node_modules/
+apps/web/.output/
+apps/web/.nuxt/
+apps/web/dist/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Go
+apps/api/bin/
+apps/api/tmp/
+apps/api/cmd/server/server
+apps/api/cmd/worker/worker
+*.exe
+*.test
+*.out
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# SeaweedFS & Storage
+data/
+seaweedfs_data/
+models/
+*.gguf
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
