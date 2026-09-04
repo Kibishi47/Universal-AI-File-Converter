@@ -52,11 +52,29 @@ Plateforme universelle de conversion de fichiers éphémère, résiliente, respe
 - *(Optionnel pour le LLM)* Déposez un modèle GGUF (ex: `Llama-3-8B-Instruct-Q4_K_M.gguf`) dans `docker/dev/models/default.gguf`. Si aucun modèle n'est monté, le worker bascule automatiquement sur le moteur de règles déterministe haute fiabilité intégré.
 
 ### 2. Démarrer toute la stack
-Exécutez simplement la commande suivante depuis la racine du projet :
 
+Avec le **Makefile** (recommandé) :
+```bash
+# Démarrage avec build
+make dev-build
+
+# Ou simple démarrage
+make dev
+```
+
+Ou directement avec Docker Compose :
 ```bash
 docker compose -f docker/dev/docker-compose.yml up --build
 ```
+
+### 3. Commandes utiles (Makefile)
+- `make dev` / `make dev-build` : Lancer la stack locale
+- `make down` : Stopper tous les conteneurs
+- `make logs` / `make logs-api` / `make logs-worker` / `make logs-web` : Suivre les logs en direct
+- `make ps` : Afficher l'état des conteneurs
+- `make build` : Compiler les binaires Go et le bundle Nuxt en local
+- `make clean` : Nettoyer conteneurs, volumes et dossiers de build
+- `make init-bucket` : Initialiser le bucket S3 sur SeaweedFS
 
 ### 3. Services disponibles
 | Service | URL / Port | Description |
