@@ -1,0 +1,37 @@
+# Production Multi-Stage Dockerfile for Go Worker
+FROM golang:1.22-bookworm AS builder
+
+WORKDIR /app
+
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN go mod download
+
+COPY apps/api ./
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/worker ./cmd/worker
+
+# Production worker container with full conversion CLI suite
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pandoc \
+    ffmpeg \
+    libvips-tools \
+    poppler-utils \
+    libreoffice \
+    imagemagick \
+    ghostscript \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fix ImageMagick PDF security policy
+RUN if [ -f /etc/ImageMagick-6/policy.xml ]; then \
+      sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/g' /etc/ImageMagick-6/policy.xml ; \
+    fi
+
+WORKDIR /app
+
+COPY --from=builder /app/worker /app/worker
+
+CMD ["/app/worker"]

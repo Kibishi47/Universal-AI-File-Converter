@@ -1,0 +1,29 @@
+FROM golang:1.22-bookworm
+
+# Install common CLI conversion tools + apt package manager enabled for dynamic installations
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pandoc \
+    ffmpeg \
+    libvips-tools \
+    poppler-utils \
+    libreoffice \
+    imagemagick \
+    ghostscript \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Disable ImageMagick security policy restrictions for PDF/PS processing in conversion worker
+RUN if [ -f /etc/ImageMagick-6/policy.xml ]; then \
+      sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/g' /etc/ImageMagick-6/policy.xml ; \
+    fi
+
+WORKDIR /app
+
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN go mod download
+
+COPY apps/api ./
+
+CMD ["go", "run", "./cmd/worker/main.go"]
