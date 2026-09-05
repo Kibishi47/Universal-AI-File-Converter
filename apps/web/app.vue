@@ -16,12 +16,7 @@
           </span>
         </div>
 
-        <div class="flex items-center gap-3">
-          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-brand-500/10 text-brand-400 border border-brand-500/20">
-            <span class="w-2 h-2 rounded-full bg-brand-400 animate-pulse"></span>
-            LLM Local Actif
-          </span>
-        </div>
+        <div></div>
       </div>
     </header>
 

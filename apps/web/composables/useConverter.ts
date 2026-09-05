@@ -28,7 +28,15 @@ export const useConverter = () => {
     if (savedTarget) {
       globalTargetExt.value = savedTarget
     }
-    setupSSE()
+    if (sessionUUID.value) {
+      setupSSE()
+    }
+  })
+
+  watch(sessionUUID, (newVal) => {
+    if (newVal) {
+      setupSSE()
+    }
   })
 
   onBeforeUnmount(() => {
@@ -121,6 +129,9 @@ export const useConverter = () => {
     try {
       const response = await fetch(`${apiBase}/api/upload`, {
         method: 'POST',
+        headers: {
+          'X-Session-UUID': sessionUUID.value,
+        },
         body: formData,
       })
 
