@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -57,20 +58,22 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 20s timeout and token limit
+// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 60s timeout and token limit
 func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string, maxTokens int) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Enforce 20-second contextual timeout per inference request to never lock mutex indefinitely
-	infCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	// Enforce 60-second contextual timeout per inference request
+	infCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	if maxTokens <= 0 {
 		maxTokens = 256
 	}
 
-	// First try llama.cpp native endpoint (/completion) which natively takes grammar
+	var errorsList []string
+
+	// 1. Try llama.cpp native endpoint (/completion) with grammar
 	nativeReqBody := map[string]interface{}{
 		"prompt":      fmt.Sprintf("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", systemPrompt, userPrompt),
 		"grammar":     grammar,
@@ -82,24 +85,35 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 	if err == nil {
 		endpoint := fmt.Sprintf("%s/completion", c.baseURL)
 		req, reqErr := http.NewRequestWithContext(infCtx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-		if reqErr == nil {
+		if reqErr != nil {
+			log.Printf("[LLM Client] Failed to build /completion request: %v", reqErr)
+			errorsList = append(errorsList, fmt.Sprintf("native req error: %v", reqErr))
+		} else {
 			req.Header.Set("Content-Type", "application/json")
 			resp, doErr := c.httpClient.Do(req)
-			if doErr == nil {
+			if doErr != nil {
+				log.Printf("[LLM Client] Native /completion request error to %s: %v", endpoint, doErr)
+				errorsList = append(errorsList, fmt.Sprintf("native do error: %v", doErr))
+			} else {
 				defer resp.Body.Close()
+				respBytes, _ := io.ReadAll(resp.Body)
 				if resp.StatusCode == http.StatusOK {
 					var comp struct {
 						Content string `json:"content"`
 					}
-					if err := json.NewDecoder(resp.Body).Decode(&comp); err == nil && comp.Content != "" {
+					if decErr := json.Unmarshal(respBytes, &comp); decErr == nil && comp.Content != "" {
 						return strings.TrimSpace(comp.Content), nil
 					}
+					errorsList = append(errorsList, fmt.Sprintf("native decode error or empty content: %s", string(respBytes)))
+				} else {
+					log.Printf("[LLM Client] Native /completion status %d from %s: %s", resp.StatusCode, endpoint, string(respBytes))
+					errorsList = append(errorsList, fmt.Sprintf("native status %d: %s", resp.StatusCode, string(respBytes)))
 				}
 			}
 		}
 	}
 
-	// Fallback to OpenAI-compatible /v1/chat/completions with grammar parameter
+	// 2. Fallback to OpenAI-compatible /v1/chat/completions with grammar and response_format
 	chatReqBody := map[string]interface{}{
 		"model": c.model,
 		"messages": []map[string]string{
@@ -114,25 +128,27 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 
 	chatBytes, err := json.Marshal(chatReqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal chat grammar request: %w", err)
+		return "", fmt.Errorf("failed to marshal chat grammar request: %w (prior: %s)", err, strings.Join(errorsList, "; "))
 	}
 
 	chatEndpoint := fmt.Sprintf("%s/v1/chat/completions", c.baseURL)
 	req, err := http.NewRequestWithContext(infCtx, http.MethodPost, chatEndpoint, bytes.NewReader(chatBytes))
 	if err != nil {
-		return "", fmt.Errorf("failed to create chat grammar request: %w", err)
+		return "", fmt.Errorf("failed to create chat grammar request: %w (prior: %s)", err, strings.Join(errorsList, "; "))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("llm grammar request failed: %w", err)
+		log.Printf("[LLM Client] Chat /v1/chat/completions request error to %s: %v", chatEndpoint, err)
+		return "", fmt.Errorf("llm chat request failed: %w (prior errors: %s)", err, strings.Join(errorsList, "; "))
 	}
 	defer resp.Body.Close()
 
+	respData, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		respData, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("llm grammar response status %d: %s", resp.StatusCode, string(respData))
+		log.Printf("[LLM Client] Chat /v1/chat/completions returned status %d from %s: %s", resp.StatusCode, chatEndpoint, string(respData))
+		return "", fmt.Errorf("llm grammar response status %d: %s (prior errors: %s)", resp.StatusCode, string(respData), strings.Join(errorsList, "; "))
 	}
 
 	var chatCompletion struct {
@@ -143,12 +159,14 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 		} `json:"choices"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&chatCompletion); err != nil {
-		return "", fmt.Errorf("failed to decode chat grammar response: %w", err)
+	if err := json.Unmarshal(respData, &chatCompletion); err != nil {
+		log.Printf("[LLM Client] Failed to decode chat completion: %v (raw: %s)", err, string(respData))
+		return "", fmt.Errorf("failed to decode chat grammar response: %w (raw: %s)", err, string(respData))
 	}
 
 	if len(chatCompletion.Choices) == 0 {
-		return "", fmt.Errorf("empty choices from llm grammar response")
+		log.Printf("[LLM Client] Empty choices from chat response: %s", string(respData))
+		return "", fmt.Errorf("empty choices from llm grammar response: %s", string(respData))
 	}
 
 	return strings.TrimSpace(chatCompletion.Choices[0].Message.Content), nil

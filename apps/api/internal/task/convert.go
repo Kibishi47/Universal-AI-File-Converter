@@ -105,8 +105,8 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 
 	feasibility, err := h.llm.CheckFeasibility(ctx, p.OriginalName, fileSize, p.DetectedMime, p.DetectedExt, p.TargetExt)
 	if err != nil {
-		log.Printf("[Worker Task] Feasibility check failed (timeout/error): %v", err)
-		h.publishError(ctx, &p, "Délai d'analyse dépassé")
+		log.Printf("[Worker Task] Feasibility check failed with error: %v", err)
+		h.publishError(ctx, &p, "Le service d'analyse IA est momentanément indisponible")
 		return asynq.SkipRetry
 	}
 	if !feasibility.Convertible {
