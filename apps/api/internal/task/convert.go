@@ -293,19 +293,31 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 
 		stepFailed := false
 		for stepIdx, step := range plan.Steps {
-			// Replace $INPUT and $OUTPUT tokens securely
+			// Replace all variants of $INPUT and $OUTPUT placeholders securely
 			var secureArgs []string
 			for _, arg := range step.Args {
-				a := strings.ReplaceAll(arg, "$INPUT", inputFilePath)
+				a := arg
+				// Replace INPUT variants
+				a = strings.ReplaceAll(a, "${INPUT}", inputFilePath)
+				a = strings.ReplaceAll(a, "$INPUT", inputFilePath)
+				a = strings.ReplaceAll(a, "${input}", inputFilePath)
+				a = strings.ReplaceAll(a, "$input", inputFilePath)
+
+				// Replace OUTPUT variants
+				a = strings.ReplaceAll(a, "${OUTPUT}", outputFilePath)
 				a = strings.ReplaceAll(a, "$OUTPUT", outputFilePath)
+				a = strings.ReplaceAll(a, "${output}", outputFilePath)
+				a = strings.ReplaceAll(a, "$output", outputFilePath)
+
 				secureArgs = append(secureArgs, a)
 			}
 
 			log.Printf("[Worker Task] Executing step %d: %s %v", stepIdx+1, step.Command, secureArgs)
 			_, stderrStr, execErr := h.runner.ExecuteStep(ctx, step.Command, secureArgs, sandboxDir)
 			if execErr != nil {
-				log.Printf("[Worker Task] Step %s failed: %v, stderr: %s", step.Command, execErr, stderrStr)
-				lastStderr = fmt.Sprintf("Command %s failed: %v. Stderr: %s", step.Command, execErr, stderrStr)
+				cleanStderr := strings.TrimSpace(stderrStr)
+				log.Printf("[Worker Task] Step %s failed: %v, stderr: %s", step.Command, execErr, cleanStderr)
+				lastStderr = fmt.Sprintf("Command %s failed: %v. Stderr: %s", step.Command, execErr, cleanStderr)
 				stepFailed = true
 				break
 			}
@@ -318,12 +330,13 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 	}
 
 	if !executionSuccess {
-		log.Printf("[Worker Task] All execution attempts failed: %s", lastStderr)
+		cleanedFinalStderr := strings.TrimSpace(lastStderr)
+		log.Printf("[Worker Task] All execution attempts failed: %s", cleanedFinalStderr)
 		if h.gh != nil {
-			_ = h.gh.ReportConversionFailure(ctx, "agentic-pipeline", p.DetectedExt, p.TargetExt, "multi-step", lastStderr)
+			_ = h.gh.ReportConversionFailure(ctx, "agentic-pipeline", p.DetectedExt, p.TargetExt, "multi-step", cleanedFinalStderr)
 		}
-		// Formulate the error message dynamically using the LLM based on stderr
-		explainedReason := h.llm.ExplainFailure(ctx, p.DetectedExt, p.TargetExt, lastStderr)
+		// Formulate the error message dynamically using the LLM based on clean stderr
+		explainedReason := h.llm.ExplainFailure(ctx, p.DetectedExt, p.TargetExt, cleanedFinalStderr)
 		h.publishError(ctx, &p, explainedReason)
 		return nil
 	}

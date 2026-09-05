@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -45,26 +44,22 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	model      string
-	mu         sync.Mutex
 }
 
 func NewClient(baseURL, model string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 150 * time.Second,
 		},
 		model: model,
 	}
 }
 
-// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 60s timeout and token limit
+// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 120s timeout and token limit
 func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string, maxTokens int) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Enforce 60-second contextual timeout per inference request
-	infCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// Enforce 120-second contextual timeout per inference request to absorb CPU load
+	infCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	if maxTokens <= 0 {
@@ -222,15 +217,18 @@ What CLI tools are needed to perform this conversion, and what is the system pac
 
 // SynthesizePlan (Phase 3) generates the exact bash command steps
 func (c *Client) SynthesizePlan(ctx context.Context, sourceExt, targetExt string, availableTools []string, errorFeedback string) (*ExecutionPlan, error) {
-	systemPrompt := `You are an expert command line synthesizer. Generate the exact execution steps to convert a file from source to target. Use $INPUT as placeholder for the source file and $OUTPUT for the destination file. Return strictly a JSON object adhering to the grammar.`
+	systemPrompt := `You are an expert command line synthesizer.
+Generate the minimal, exact execution steps to convert a file from source to target.
+Always use $INPUT as placeholder for the source file and $OUTPUT for the destination file.
+Return strictly a JSON object adhering to the grammar.`
 	userPrompt := fmt.Sprintf(`Source Extension: %s
 Target Extension: %s
 Available CLI tools on system: [%s]
 Previous error feedback (if any): %s
 
-Generate steps with command (the binary name) and args array.`, sourceExt, targetExt, strings.Join(availableTools, ", "), errorFeedback)
+Generate steps with command (the binary name) and args array using $INPUT and $OUTPUT placeholders.`, sourceExt, targetExt, strings.Join(availableTools, ", "), errorFeedback)
 
-	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExecution, 512)
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExecution, 256)
 	if err != nil {
 		return nil, fmt.Errorf("llm plan synthesis failed: %w", err)
 	}
@@ -292,15 +290,15 @@ func (c *Client) PlanConversion(ctx context.Context, originalName, detectedMime,
 // ExplainFailure asks the LLM using GrammarExplanation to formulate a concise single-sentence failure cause strictly based on stderr
 func (c *Client) ExplainFailure(ctx context.Context, sourceExt, targetExt, stderr string) string {
 	systemPrompt := `You are an expert technical debugger for file conversions.
-Based strictly on the provided process error output (stderr), explain why the conversion failed.
-You must output a single, concise sentence of at most 20 to 25 words. Do not invent details not present in stderr.
+Based strictly on the provided process error output (stderr), explain in French why the conversion failed.
+You must output a single, concise sentence in French of at most 20 to 25 words. Do not invent details not present in stderr.
 Output JSON matching the grammar.`
 	userPrompt := fmt.Sprintf(`Source Extension: %s
 Target Extension: %s
 Execution stderr:
 %s
 
-State the exact cause of failure in 1 sentence (max 25 words). Set convertible=false and reason to your concise explanation.`, sourceExt, targetExt, strings.TrimSpace(stderr))
+State the exact cause of failure in French in 1 single sentence (max 25 words). Set convertible=false and reason to your concise French explanation.`, sourceExt, targetExt, strings.TrimSpace(stderr))
 
 	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExplanation, 60)
 	if err == nil {
