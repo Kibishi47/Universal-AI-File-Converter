@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,6 +44,7 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	model      string
+	mu         sync.Mutex
 }
 
 func NewClient(baseURL, model string) *Client {
@@ -57,6 +59,9 @@ func NewClient(baseURL, model string) *Client {
 
 // CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint
 func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// First try llama.cpp native endpoint (/completion) which natively takes grammar
 	nativeReqBody := map[string]interface{}{
 		"prompt":      fmt.Sprintf("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", systemPrompt, userPrompt),
