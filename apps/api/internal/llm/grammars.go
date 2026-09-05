@@ -8,16 +8,16 @@ boolean ::= "true" | "false"
 ws ::= [ \t\n]*
 string ::= "\"" [^"\\]* "\""`
 
-// GrammarTools forces JSON: { "required_tools": string[], "alternatives": string[] }
-const GrammarTools = `root ::= "{" ws "\"required_tools\":" ws stringlist "," ws "\"alternatives\":" ws stringlist "}"
-stringlist ::= "[" ws (string ("," ws string)*)? ws "]"
-string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
-ws ::= [ \t\n\r]*`
+// GrammarTools forces JSON: { "tools": string[], "package_hint": string }
+const GrammarTools = `root ::= "{" ws "\"tools\":" ws tool_list "," ws "\"package_hint\":" ws string "}"
+tool_list ::= "[" ws (string ("," ws string)*)? ws "]"
+ws ::= [ \t\n]*
+string ::= "\"" [a-zA-Z0-9_.-]+ "\""`
 
 // GrammarExecution forces JSON: { "steps": [ { "command": string, "args": string[] } ] }
-const GrammarExecution = `root ::= "{" ws "\"steps\":" ws steplist "}"
-steplist ::= "[" ws (step ("," ws step)*)? ws "]"
-step ::= "{" ws "\"command\":" ws string "," ws "\"args\":" ws stringlist "}"
-stringlist ::= "[" ws (string ("," ws string)*)? ws "]"
-string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
-ws ::= [ \t\n\r]*`
+const GrammarExecution = `root ::= "{" ws "\"steps\":" ws step_list "}"
+step_list ::= "[" ws step ("," ws step)* ws "]"
+step ::= "{" ws "\"command\":" ws string "," ws "\"args\":" ws string_list "}"
+string_list ::= "[" ws (string ("," ws string)*)? ws "]"
+ws ::= [ \t\n]*
+string ::= "\"" [^"\\]* "\""`

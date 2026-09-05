@@ -139,9 +139,10 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 	}
 
 	var candidateTools []string
+	var packageHint string
 	if toolsResult != nil {
-		candidateTools = append(candidateTools, toolsResult.RequiredTools...)
-		candidateTools = append(candidateTools, toolsResult.Alternatives...)
+		candidateTools = append(candidateTools, toolsResult.Tools...)
+		packageHint = strings.TrimSpace(toolsResult.PackageHint)
 	}
 
 	// Check local presence with exec.LookPath
@@ -158,7 +159,7 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 
 	// If tools are missing, attempt dynamic installation & report to GitHub
 	for _, missingTool := range missingTools {
-		log.Printf("[Worker Task] Missing tool detected: %s", missingTool)
+		log.Printf("[Worker Task] Missing tool detected: %s (package hint: %s)", missingTool, packageHint)
 		_ = h.q.PublishEvent(ctx, p.SessionUUID, queue.ProgressEvent{
 			SessionUUID:  p.SessionUUID,
 			FileID:       p.FileID,
@@ -174,12 +175,19 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 			_ = h.gh.ReportMissingDependency(ctx, missingTool, p.DetectedExt, p.TargetExt)
 		}
 
-		// Attempt dynamic installation
-		if installErr := h.runner.InstallTool(ctx, missingTool); installErr == nil {
-			log.Printf("[Worker Task] Dynamic installation succeeded for %s", missingTool)
-			availableTools = append(availableTools, missingTool)
+		// Attempt dynamic installation using LLM package hint or tool name
+		pkgToInstall := missingTool
+		if packageHint != "" {
+			pkgToInstall = packageHint
+		}
+
+		if installErr := h.runner.InstallTool(ctx, pkgToInstall); installErr == nil {
+			log.Printf("[Worker Task] Dynamic installation succeeded for %s (%s)", missingTool, pkgToInstall)
+			if h.runner.CheckTool(missingTool) {
+				availableTools = append(availableTools, missingTool)
+			}
 		} else {
-			log.Printf("[Worker Task] Dynamic installation failed for %s: %v", missingTool, installErr)
+			log.Printf("[Worker Task] Dynamic installation failed for %s (%s): %v", missingTool, pkgToInstall, installErr)
 		}
 	}
 
@@ -314,7 +322,9 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 		if h.gh != nil {
 			_ = h.gh.ReportConversionFailure(ctx, "agentic-pipeline", p.DetectedExt, p.TargetExt, "multi-step", lastStderr)
 		}
-		h.publishError(ctx, &p, "La conversion a échoué après plusieurs tentatives d'auto-correction.")
+		// Formulate the error message dynamically using the LLM based on stderr
+		explainedReason := h.llm.ExplainFailure(ctx, p.DetectedExt, p.TargetExt, lastStderr)
+		h.publishError(ctx, &p, explainedReason)
 		return nil
 	}
 

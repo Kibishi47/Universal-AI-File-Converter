@@ -18,8 +18,8 @@ type FeasibilityResult struct {
 }
 
 type ToolsResult struct {
-	RequiredTools []string `json:"required_tools"`
-	Alternatives  []string `json:"alternatives"`
+	Tools       []string `json:"tools"`
+	PackageHint string   `json:"package_hint"`
 }
 
 type ExecutionStep struct {
@@ -156,23 +156,11 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 
 // CheckFeasibility (Phase 1) checks if the file can be converted to the target format
 func (c *Client) CheckFeasibility(ctx context.Context, originalName string, size int64, detectedMime, detectedExt, targetExt string) (*FeasibilityResult, error) {
-	systemPrompt := `You are a strict media-type feasibility evaluator.
-Rule: A direct file conversion is ONLY feasible (convertible=true) if source and target formats belong to the SAME media category:
-
-Image to Image (e.g. JPG to WEBP, PNG to SVG, TIFF to JPG) -> TRUE
-Video to Video (e.g. MKV to MP4, AVI to WEBM) -> TRUE
-Video to Audio extraction (e.g. MP4 to MP3, MKV to WAV) -> TRUE
-Audio to Audio (e.g. WAV to MP3, FLAC to OGG) -> TRUE
-Document to Document (e.g. DOCX to PDF, MD to HTML, TXT to PDF) -> TRUE
-Archive to Archive (e.g. TAR to ZIP) -> TRUE
-
-STRICT FORBIDDEN CASES (MUST RETURN convertible=false):
-Static Image to Video (e.g. JPG to MP4, PNG to MKV) -> FALSE (a single still image is not a video stream)
-Static Image to Audio (e.g. JPG to MP3, PNG to WAV) -> FALSE
-Audio to Video (without dedicated visualizer) -> FALSE
-Audio to Image -> FALSE
-
-If convertible=false, provide a concise user-friendly reason (e.g. 'Cannot convert a static image into a video file').
+	systemPrompt := `You are an autonomous cognitive file format conversion evaluator.
+Determine if source format can technically and meaningfully be directly converted to target format while preserving the intrinsic nature of the data.
+Conversions that require hallucinating data or lack direct technical pipelines (e.g. still image to video stream without explicit animation/audio, arbitrary binary/executable to media, still image to audio) MUST return convertible=false.
+Any technically meaningful conversion across 2D/3D/CAD/scientific/media/document/archive formats (e.g. .blend, .dxf, .fits, .epub, .wasm, .heic, etc.) with existing open-source/CLI conversion pipelines is convertible=true.
+If convertible=false, explain concisely and clearly in 'reason' why this conversion is impossible for the user.
 Respond strictly using the JSON grammar.`
 	userPrompt := fmt.Sprintf(`Source File: %s
 File Size: %d bytes
@@ -180,19 +168,11 @@ Detected MIME: %s
 Source Extension: %s
 Target Extension: %s
 
-Can this source format technically be converted or exported to the target extension?`, originalName, size, detectedMime, detectedExt, targetExt)
+Can this source format technically and meaningfully be directly converted to the target extension?`, originalName, size, detectedMime, detectedExt, targetExt)
 
 	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarFeasibility, 256)
 	if err != nil {
-		// Fallback to rule engine check
-		fb, fbErr := FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt, nil)
-		if fbErr == nil {
-			return &FeasibilityResult{
-				Convertible: fb.IsConvertible,
-				Reason:      "Rule engine deterministic analysis",
-			}, nil
-		}
-		return nil, err
+		return nil, fmt.Errorf("llm feasibility check failed: %w", err)
 	}
 
 	var res FeasibilityResult
@@ -202,25 +182,17 @@ Can this source format technically be converted or exported to the target extens
 	return &res, nil
 }
 
-// DiscoverTools (Phase 2) discovers required CLI tools and possible alternatives
+// DiscoverTools (Phase 2) discovers required CLI tools and package hint via GBNF
 func (c *Client) DiscoverTools(ctx context.Context, sourceExt, targetExt string) (*ToolsResult, error) {
-	systemPrompt := `You are an expert system administrator for CLI file conversion. Identify the required CLI tools (binary names) and alternatives to convert the source extension to target extension. Return strictly a JSON object adhering to the grammar.`
+	systemPrompt := `You are an expert system administrator for CLI file conversion. Identify the required CLI binary names in 'tools' and the distribution package name hint (apt/apk) in 'package_hint' to convert source to target format. Return strictly a JSON object adhering to the grammar.`
 	userPrompt := fmt.Sprintf(`Source Extension: %s
 Target Extension: %s
 
-What CLI tools are needed to perform this conversion? Examples of binaries: ffmpeg, pandoc, libreoffice, vips, pdftoppm, gs, convert, magick.`, sourceExt, targetExt)
+What CLI tools are needed to perform this conversion, and what is the system package name to install them?`, sourceExt, targetExt)
 
 	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarTools, 256)
 	if err != nil {
-		// Fallback to rule engine tool
-		fb, fbErr := FallbackRuleEngine("input."+sourceExt, "", sourceExt, targetExt, nil)
-		if fbErr == nil && fb.RequiredTool != "" {
-			return &ToolsResult{
-				RequiredTools: []string{fb.RequiredTool},
-				Alternatives:  []string{},
-			}, nil
-		}
-		return nil, err
+		return nil, fmt.Errorf("llm tool discovery failed: %w", err)
 	}
 
 	var res ToolsResult
@@ -242,25 +214,7 @@ Generate steps with command (the binary name) and args array.`, sourceExt, targe
 
 	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExecution, 512)
 	if err != nil {
-		// Fallback to rule engine
-		fb, fbErr := FallbackRuleEngine("input."+sourceExt, "", sourceExt, targetExt, availableTools)
-		if fbErr == nil {
-			parts := strings.Fields(fb.CommandTemplate)
-			if len(parts) > 0 {
-				var args []string
-				for _, p := range parts[1:] {
-					p = strings.ReplaceAll(p, "{{input}}", "$INPUT")
-					p = strings.ReplaceAll(p, "{{output}}", "$OUTPUT")
-					args = append(args, p)
-				}
-				return &ExecutionPlan{
-					Steps: []ExecutionStep{
-						{Command: parts[0], Args: args},
-					},
-				}, nil
-			}
-		}
-		return nil, err
+		return nil, fmt.Errorf("llm plan synthesis failed: %w", err)
 	}
 
 	var res ExecutionPlan
@@ -286,9 +240,9 @@ func (c *Client) PlanConversion(ctx context.Context, originalName, detectedMime,
 	}
 
 	tools, err := c.DiscoverTools(ctx, detectedExt, targetExt)
-	reqTool := "pandoc"
-	if err == nil && len(tools.RequiredTools) > 0 {
-		reqTool = tools.RequiredTools[0]
+	reqTool := ""
+	if err == nil && len(tools.Tools) > 0 {
+		reqTool = tools.Tools[0]
 	}
 
 	toolInstalled := false
@@ -317,131 +271,23 @@ func (c *Client) PlanConversion(ctx context.Context, originalName, detectedMime,
 	}, nil
 }
 
-// FallbackRuleEngine provides deterministic templates for offline or fallback conversion
-func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt string, installedTools []string) (*DecisionResponse, error) {
-	src := strings.ToLower(detectedExt)
-	tgt := strings.ToLower(targetExt)
+// ExplainFailure asks the LLM using GrammarFeasibility to formulate a clear, user-friendly failure cause from stderr logs
+func (c *Client) ExplainFailure(ctx context.Context, sourceExt, targetExt, stderr string) string {
+	systemPrompt := `You are an expert technical debugger for file conversions. Formulate a concise, clear and user-friendly explanation in one sentence of why the conversion failed based on the error logs. Output JSON only matching the grammar.`
+	userPrompt := fmt.Sprintf(`Source Extension: %s
+Target Extension: %s
+Process Error Output (stderr):
+%s
 
-	isInstalled := func(tool string) bool {
-		for _, t := range installedTools {
-			if strings.EqualFold(t, tool) {
-				return true
-			}
-		}
-		return false
-	}
+Formulate why this conversion failed. Set convertible=false and reason to the user-friendly explanation.`, sourceExt, targetExt, stderr)
 
-	var tool string
-	var cmd string
-
-	switch {
-	case isImage(src) && isVideo(tgt):
-		reason := "Cannot convert a static image into a video file"
-		return &DecisionResponse{
-			DetectedMime:    detectedMime,
-			IsConvertible:   false,
-			RejectionReason: &reason,
-		}, nil
-	case isImage(src) && isAudio(tgt):
-		reason := "Cannot convert an image into an audio file"
-		return &DecisionResponse{
-			DetectedMime:    detectedMime,
-			IsConvertible:   false,
-			RejectionReason: &reason,
-		}, nil
-	case isAudio(src) && isVideo(tgt):
-		reason := "Cannot convert an audio file into a video file without dedicated visualizer"
-		return &DecisionResponse{
-			DetectedMime:    detectedMime,
-			IsConvertible:   false,
-			RejectionReason: &reason,
-		}, nil
-	case isAudio(src) && isImage(tgt):
-		reason := "Cannot convert an audio file into an image"
-		return &DecisionResponse{
-			DetectedMime:    detectedMime,
-			IsConvertible:   false,
-			RejectionReason: &reason,
-		}, nil
-	case isMedia(src) && isMedia(tgt):
-		tool = "ffmpeg"
-		cmd = "ffmpeg -y -i {{input}} {{output}}"
-	case (src == "docx" || src == "doc" || src == "odt" || src == "rtf" || src == "txt") && tgt == "pdf":
-		tool = "libreoffice"
-		cmd = "libreoffice --headless --convert-to pdf {{input}} --outdir $(dirname {{output}})"
-	case (src == "xlsx" || src == "xls" || src == "ods" || src == "csv") && (tgt == "pdf" || tgt == "csv"):
-		tool = "libreoffice"
-		cmd = fmt.Sprintf("libreoffice --headless --convert-to %s {{input}} --outdir $(dirname {{output}})", tgt)
-	case (src == "pptx" || src == "ppt" || src == "odp") && tgt == "pdf":
-		tool = "libreoffice"
-		cmd = "libreoffice --headless --convert-to pdf {{input}} --outdir $(dirname {{output}})"
-	case (src == "md" || src == "markdown" || src == "html" || src == "rst") && (tgt == "html" || tgt == "docx" || tgt == "pdf" || tgt == "md" || tgt == "txt"):
-		tool = "pandoc"
-		cmd = "pandoc {{input}} -o {{output}}"
-	case isImage(src) && isImage(tgt):
-		tool = "vips"
-		cmd = "vips copy {{input}} {{output}}"
-	case src == "pdf" && isImage(tgt):
-		tool = "pdftoppm"
-		cmd = fmt.Sprintf("pdftoppm -%s -r 150 {{input}} $(dirname {{output}})/page", tgt)
-	case isArchive(src) && isArchive(tgt):
-		tool = "tar"
-		cmd = "tar -czvf {{output}} {{input}}"
-	default:
-		tool = "pandoc"
-		cmd = "pandoc {{input}} -o {{output}}"
-	}
-
-	return &DecisionResponse{
-		DetectedMime:    detectedMime,
-		IsConvertible:   true,
-		RejectionReason: nil,
-		RequiredTool:    tool,
-		ToolInstalled:   isInstalled(tool),
-		CommandTemplate: cmd,
-	}, nil
-}
-
-func isMedia(ext string) bool {
-	return isVideo(ext) || isAudio(ext)
-}
-
-func isVideo(ext string) bool {
-	videos := []string{"mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v"}
-	for _, v := range videos {
-		if ext == v {
-			return true
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarFeasibility, 256)
+	if err == nil {
+		var res FeasibilityResult
+		if err := json.Unmarshal([]byte(raw), &res); err == nil && res.Reason != "" {
+			return res.Reason
 		}
 	}
-	return false
-}
 
-func isAudio(ext string) bool {
-	audios := []string{"mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus"}
-	for _, a := range audios {
-		if ext == a {
-			return true
-		}
-	}
-	return false
-}
-
-func isArchive(ext string) bool {
-	archives := []string{"tar", "zip", "gz", "bz2", "xz", "7z", "rar"}
-	for _, a := range archives {
-		if ext == a {
-			return true
-		}
-	}
-	return false
-}
-
-func isImage(ext string) bool {
-	images := []string{"png", "jpg", "jpeg", "webp", "gif", "tiff", "svg", "bmp", "avif"}
-	for _, img := range images {
-		if ext == img {
-			return true
-		}
-	}
-	return false
+	return "La conversion a échoué lors de l'exécution des commandes."
 }
