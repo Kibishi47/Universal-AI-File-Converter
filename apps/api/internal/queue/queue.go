@@ -111,6 +111,17 @@ func (q *Queue) EnqueueConversion(payload *ConversionTaskPayload) (*asynq.TaskIn
 	return q.client.Enqueue(task)
 }
 
+// EnqueueConversionIn schedules a conversion task to be processed after a specified delay
+func (q *Queue) EnqueueConversionIn(payload *ConversionTaskPayload, delay time.Duration) (*asynq.TaskInfo, error) {
+	bytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal task payload: %w", err)
+	}
+
+	task := asynq.NewTask(TypeConversionTask, bytes, asynq.MaxRetry(3), asynq.Timeout(5*time.Minute))
+	return q.client.Enqueue(task, asynq.ProcessIn(delay))
+}
+
 // PublishEvent sends a real-time progress update to the session channel
 func (q *Queue) PublishEvent(ctx context.Context, sessionUUID string, event ProgressEvent) error {
 	event.Timestamp = time.Now().UnixMilli()

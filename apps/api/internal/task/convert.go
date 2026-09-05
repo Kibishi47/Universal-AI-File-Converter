@@ -58,6 +58,32 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 
 	log.Printf("[Worker Task] Interleaving ReAct loop started: %s (%s -> %s)", p.OriginalName, p.DetectedExt, p.TargetExt)
 
+	// Acquire per-session distributed Redis lock to ensure sequential FIFO processing per session
+	rdb := h.q.GetRedisClient()
+	lockKey := fmt.Sprintf("session:%s:processing", p.SessionUUID)
+	acquired, err := rdb.SetNX(ctx, lockKey, p.FileID, 5*time.Minute).Result()
+	if err != nil {
+		log.Printf("[Worker Task] Redis error attempting to acquire session lock %s: %v", lockKey, err)
+		return err
+	}
+	if !acquired {
+		// Session is currently busy processing another file. Reschedule this task with a small delay.
+		log.Printf("[Worker Task] Session %s is already processing another file. Postponing task %s (file: %s)...", p.SessionUUID, t.Type(), p.FileID)
+		if _, enqueueErr := h.q.EnqueueConversionIn(&p, 2*time.Second); enqueueErr != nil {
+			log.Printf("[Worker Task] Failed to reschedule task for session %s: %v", p.SessionUUID, enqueueErr)
+		}
+		// Skip retry of the current task instance as it has been re-scheduled
+		return asynq.SkipRetry
+	}
+	// Ensure the session lock is released upon task completion or error
+	defer func() {
+		// Safe unlock: only delete if the lock still belongs to this task/file
+		val, getErr := rdb.Get(context.Background(), lockKey).Result()
+		if getErr == nil && val == p.FileID {
+			rdb.Del(context.Background(), lockKey)
+		}
+	}()
+
 	// ==========================================
 	// Phase 1 : Feasibility Check (GrammarFeasibility)
 	// ==========================================
