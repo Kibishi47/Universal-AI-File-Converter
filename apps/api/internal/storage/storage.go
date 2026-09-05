@@ -85,3 +85,27 @@ func (s *Storage) Delete(ctx context.Context, objectName string) error {
 func (s *Storage) PresignedURL(ctx context.Context, objectName string, expires time.Duration) (*url.URL, error) {
 	return s.client.PresignedGetObject(ctx, s.bucketName, objectName, expires, nil)
 }
+
+// DeleteExpiredObjects removes objects older than maxAge from the bucket
+func (s *Storage) DeleteExpiredObjects(ctx context.Context, maxAge time.Duration) (int, error) {
+	cutoff := time.Now().Add(-maxAge)
+	deletedCount := 0
+
+	objectCh := s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
+		Recursive: true,
+	})
+
+	for obj := range objectCh {
+		if obj.Err != nil {
+			continue
+		}
+		if obj.LastModified.Before(cutoff) {
+			err := s.client.RemoveObject(ctx, s.bucketName, obj.Key, minio.RemoveObjectOptions{})
+			if err == nil {
+				deletedCount++
+			}
+		}
+	}
+
+	return deletedCount, nil
+}
