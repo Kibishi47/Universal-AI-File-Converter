@@ -39,7 +39,10 @@ func main() {
 		log.Printf("Warning: storage connection error: %v", err)
 	}
 
-	q := queue.New(cfg.RedisAddr)
+	q, err := queue.New(cfg.RedisAddr)
+	if err != nil {
+		log.Fatalf("Failed to initialize queue: %v", err)
+	}
 	defer q.Close()
 
 	srv := &Server{

@@ -42,7 +42,10 @@ func main() {
 		log.Printf("Worker storage init warning: %v", err)
 	}
 
-	q := queue.New(cfg.RedisAddr)
+	q, err := queue.New(cfg.RedisAddr)
+	if err != nil {
+		log.Fatalf("Failed to initialize queue in worker: %v", err)
+	}
 	defer q.Close()
 
 	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMModel)
@@ -58,8 +61,13 @@ func main() {
 		gh:     ghClient,
 	}
 
+	redisConnOpt, err := queue.ParseRedisConnOpt(cfg.RedisAddr)
+	if err != nil {
+		log.Fatalf("Failed to parse Redis configuration for worker server: %v", err)
+	}
+
 	srv := asynq.NewServer(
-		asynq.RedisClientOpt{Addr: cfg.RedisAddr},
+		redisConnOpt,
 		asynq.Config{
 			Concurrency: 4,
 			Queues: map[string]int{

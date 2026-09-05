@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -55,18 +56,44 @@ type Queue struct {
 	redisClient *redis.Client
 }
 
-func New(redisAddr string) *Queue {
-	redisOpt := asynq.RedisClientOpt{Addr: redisAddr}
-	client := asynq.NewClient(redisOpt)
+// ParseRedisConnOpt parses a redis address string (supporting redis://, rediss:// or host:port) into an asynq.RedisConnOpt
+func ParseRedisConnOpt(redisAddr string) (asynq.RedisConnOpt, error) {
+	if strings.HasPrefix(redisAddr, "redis://") || strings.HasPrefix(redisAddr, "rediss://") {
+		return asynq.ParseRedisURI(redisAddr)
+	}
+	return asynq.RedisClientOpt{Addr: redisAddr}, nil
+}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
+// New creates a Queue instance, properly handling redis://, rediss:// or raw host:port strings
+func New(redisAddr string) (*Queue, error) {
+	var asynqOpt asynq.RedisConnOpt
+	var rdb *redis.Client
+
+	if strings.HasPrefix(redisAddr, "redis://") || strings.HasPrefix(redisAddr, "rediss://") {
+		var err error
+		asynqOpt, err = asynq.ParseRedisURI(redisAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse asynq redis URI %q: %w", redisAddr, err)
+		}
+
+		redisOpts, err := redis.ParseURL(redisAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse redis URL %q: %w", redisAddr, err)
+		}
+		rdb = redis.NewClient(redisOpts)
+	} else {
+		asynqOpt = asynq.RedisClientOpt{Addr: redisAddr}
+		rdb = redis.NewClient(&redis.Options{
+			Addr: redisAddr,
+		})
+	}
+
+	client := asynq.NewClient(asynqOpt)
 
 	return &Queue{
 		client:      client,
 		redisClient: rdb,
-	}
+	}, nil
 }
 
 func (q *Queue) Close() {
