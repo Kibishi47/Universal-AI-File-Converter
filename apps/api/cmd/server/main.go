@@ -54,21 +54,38 @@ func main() {
 
 	r := chi.NewRouter()
 
+	// 1. CORS middleware must be at the very top of the chain to handle preflight (OPTIONS)
+	allowedOrigins := []string{"*"}
+	if cfg.CORSAllowedOrigins != "" {
+		allowedOrigins = []string{}
+		for _, o := range strings.Split(cfg.CORSAllowedOrigins, ",") {
+			if trimmed := strings.TrimSpace(o); trimmed != "" {
+				allowedOrigins = append(allowedOrigins, trimmed)
+			}
+		}
+	} else {
+		allowedOrigins = []string{
+			"https://converter.kibishi47.ovh",
+			"http://localhost:3000",
+			"http://127.0.0.1:3000",
+			"*",
+		}
+	}
+
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Session-UUID"},
+		ExposedHeaders:   []string{"Link", "Content-Disposition"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
+
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(120 * time.Second))
-
-	// CORS configuration for privacy & local Nuxt development
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link", "Content-Disposition"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

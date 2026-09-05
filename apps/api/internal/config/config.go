@@ -18,8 +18,9 @@ type Config struct {
 	LLMModel       string
 	GitHubToken    string
 	GitHubOwner    string
-	GitHubRepo     string
-	MaxUploadSizeMB int64
+	GitHubRepo         string
+	MaxUploadSizeMB    int64
+	CORSAllowedOrigins string
 }
 
 func Load() (*Config, error) {
@@ -43,20 +44,23 @@ func Load() (*Config, error) {
 		maxUploadMB = 100
 	}
 
+	corsAllowedOrigins := getEnv("CORS_ALLOWED_ORIGINS", "")
+
 	cfg := &Config{
-		Port:            port,
-		RedisAddr:       redisAddr,
-		S3Endpoint:      s3Endpoint,
-		S3Bucket:        s3Bucket,
-		S3AccessKey:     s3AccessKey,
-		S3SecretKey:     s3SecretKey,
-		S3UseSSL:        s3UseSSL,
-		LLMBaseURL:      llmBaseURL,
-		LLMModel:        llmModel,
-		GitHubToken:     githubToken,
-		GitHubOwner:     githubOwner,
-		GitHubRepo:      githubRepo,
-		MaxUploadSizeMB: maxUploadMB,
+		Port:               port,
+		RedisAddr:          redisAddr,
+		S3Endpoint:         s3Endpoint,
+		S3Bucket:           s3Bucket,
+		S3AccessKey:        s3AccessKey,
+		S3SecretKey:        s3SecretKey,
+		S3UseSSL:           s3UseSSL,
+		LLMBaseURL:         llmBaseURL,
+		LLMModel:           llmModel,
+		GitHubToken:        githubToken,
+		GitHubOwner:        githubOwner,
+		GitHubRepo:         githubRepo,
+		MaxUploadSizeMB:    maxUploadMB,
+		CORSAllowedOrigins: corsAllowedOrigins,
 	}
 
 	return cfg, nil
