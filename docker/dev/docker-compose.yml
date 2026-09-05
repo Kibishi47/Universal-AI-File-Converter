@@ -48,7 +48,7 @@ services:
 
   # 4. Backend API (Chi + SSE) with Hot-Reload
   api:
-    image: golang:1.22-bookworm
+    image: golang:1.23-bookworm
     container_name: converter_api
     working_dir: /app
     volumes:

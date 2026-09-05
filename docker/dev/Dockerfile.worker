@@ -1,4 +1,4 @@
-FROM golang:1.22-bookworm
+FROM golang:1.23-bookworm
 
 # Install common CLI conversion tools + apt package manager enabled for dynamic installations
 RUN apt-get update && apt-get install -y --no-install-recommends \
