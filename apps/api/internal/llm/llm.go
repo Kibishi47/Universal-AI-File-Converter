@@ -57,13 +57,13 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 15s timeout and token limit
+// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 20s timeout and token limit
 func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string, maxTokens int) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Enforce 15-second contextual timeout per inference request
-	infCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Enforce 20-second contextual timeout per inference request to never lock mutex indefinitely
+	infCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	if maxTokens <= 0 {
