@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from 'uuid'
 
 export const useSession = () => {
   const sessionUUID = useState<string>('session_uuid', () => {
