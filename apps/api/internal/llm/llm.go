@@ -289,21 +289,24 @@ func (c *Client) PlanConversion(ctx context.Context, originalName, detectedMime,
 	}, nil
 }
 
-// ExplainFailure asks the LLM using GrammarFeasibility to formulate a clear, user-friendly failure cause from stderr logs
+// ExplainFailure asks the LLM using GrammarExplanation to formulate a concise single-sentence failure cause strictly based on stderr
 func (c *Client) ExplainFailure(ctx context.Context, sourceExt, targetExt, stderr string) string {
-	systemPrompt := `You are an expert technical debugger for file conversions. Formulate a concise, clear and user-friendly explanation in one sentence of why the conversion failed based on the error logs. Output JSON only matching the grammar.`
+	systemPrompt := `You are an expert technical debugger for file conversions.
+Based strictly on the provided process error output (stderr), explain why the conversion failed.
+You must output a single, concise sentence of at most 20 to 25 words. Do not invent details not present in stderr.
+Output JSON matching the grammar.`
 	userPrompt := fmt.Sprintf(`Source Extension: %s
 Target Extension: %s
-Process Error Output (stderr):
+Execution stderr:
 %s
 
-Formulate why this conversion failed. Set convertible=false and reason to the user-friendly explanation.`, sourceExt, targetExt, stderr)
+State the exact cause of failure in 1 sentence (max 25 words). Set convertible=false and reason to your concise explanation.`, sourceExt, targetExt, strings.TrimSpace(stderr))
 
-	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarFeasibility, 256)
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExplanation, 60)
 	if err == nil {
 		var res FeasibilityResult
 		if err := json.Unmarshal([]byte(raw), &res); err == nil && res.Reason != "" {
-			return res.Reason
+			return strings.TrimSpace(res.Reason)
 		}
 	}
 

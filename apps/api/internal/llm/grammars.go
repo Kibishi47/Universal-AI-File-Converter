@@ -8,6 +8,11 @@ boolean ::= "true" | "false"
 ws ::= [ \t\n]*
 string ::= "\"" [^"\\]* "\""`
 
+// GrammarExplanation forces strict JSON: { "convertible": false, "reason": short_string } with reason restricted to max 120 chars
+const GrammarExplanation = `root ::= "{" ws "\"convertible\":" ws "false" "," ws "\"reason\":" ws short_string "}"
+ws ::= [ \t\n]*
+short_string ::= "\"" [^"\\]{1,120} "\""`
+
 // GrammarTools forces JSON: { "tools": string[], "package_hint": string }
 const GrammarTools = `root ::= "{" ws "\"tools\":" ws tool_list "," ws "\"package_hint\":" ws string "}"
 tool_list ::= "[" ws (string ("," ws string)*)? ws "]"
