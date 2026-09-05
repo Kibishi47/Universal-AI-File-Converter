@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+)
+
+const (
+	MaxLogBufferBytes = 2 * 1024 * 1024 // 2 MB limit to prevent memory exhaustion
+	ExecutionTimeout  = 120 * time.Second
 )
 
 type Runner struct {
@@ -32,7 +38,6 @@ func (r *Runner) CheckTool(toolName string) bool {
 	if toolName == "" {
 		return false
 	}
-	// Take only the first word (the executable binary)
 	parts := strings.Fields(toolName)
 	if len(parts) == 0 {
 		return false
@@ -81,26 +86,116 @@ func (r *Runner) InstallTool(ctx context.Context, toolName string) error {
 	return nil
 }
 
-// ExecuteConversion runs the CLI command with a strict timeout (120s)
+// ValidateCommand enforces security checks against prohibited or destructive commands
+func (r *Runner) ValidateCommand(command string, args []string, allowedDir string) error {
+	cmdLower := strings.ToLower(filepath.Base(command))
+
+	// Prohibited dangerous tools or privilege escalation
+	blockedCommands := []string{"sudo", "su", "chown", "chmod", "curl", "wget", "nc", "ncat", "netcat", "mkfs", "dd", "shutdown", "reboot", "init"}
+	for _, blocked := range blockedCommands {
+		if cmdLower == blocked {
+			return fmt.Errorf("prohibited command: %s is not permitted in sandbox", command)
+		}
+	}
+
+	// Restrict 'rm' to session directory only
+	if cmdLower == "rm" {
+		cleanAllowed := filepath.Clean(allowedDir)
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			cleanArg := filepath.Clean(arg)
+			if !strings.HasPrefix(cleanArg, cleanAllowed) {
+				return fmt.Errorf("safety violation: rm is restricted to session directory %s", cleanAllowed)
+			}
+		}
+	}
+
+	return nil
+}
+
+// LimitedBuffer caps memory usage to MaxLogBufferBytes
+type LimitedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func NewLimitedBuffer(limit int) *LimitedBuffer {
+	return &LimitedBuffer{limit: limit}
+}
+
+func (b *LimitedBuffer) Write(p []byte) (n int, err error) {
+	currentLen := b.buf.Len()
+	if currentLen >= b.limit {
+		return len(p), nil // drop silently without failing execution
+	}
+	remaining := b.limit - currentLen
+	if len(p) > remaining {
+		b.buf.Write(p[:remaining])
+		b.buf.WriteString("\n[...log output truncated due to 2MB buffer limit...]\n")
+		return len(p), nil
+	}
+	return b.buf.Write(p)
+}
+
+func (b *LimitedBuffer) String() string {
+	return b.buf.String()
+}
+
+// ExecuteStep runs an individual command with args within a sandbox directory with strict timeout
+func (r *Runner) ExecuteStep(ctx context.Context, command string, args []string, workingDir string) (string, string, error) {
+	if err := r.ValidateCommand(command, args, workingDir); err != nil {
+		return "", "", err
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, ExecutionTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, command, args...)
+	cmd.Dir = workingDir
+
+	stdoutBuf := NewLimitedBuffer(MaxLogBufferBytes)
+	stderrBuf := NewLimitedBuffer(MaxLogBufferBytes)
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
+
+	err := cmd.Run()
+
+	if execCtx.Err() == context.DeadlineExceeded {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("command execution timed out after %v", ExecutionTimeout)
+	}
+
+	return stdoutBuf.String(), stderrBuf.String(), err
+}
+
+// ExecuteConversion provides fallback execution for command templates with {{input}} and {{output}}
 func (r *Runner) ExecuteConversion(ctx context.Context, commandTemplate, inputPath, outputPath string) (string, error) {
-	// Interpolate {{input}} and {{output}}
 	cmdStr := strings.ReplaceAll(commandTemplate, "{{input}}", fmt.Sprintf("%q", inputPath))
 	cmdStr = strings.ReplaceAll(cmdStr, "{{output}}", fmt.Sprintf("%q", outputPath))
 
-	// Timeout context
-	execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	execCtx, cancel := context.WithTimeout(ctx, ExecutionTimeout)
 	defer cancel()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutBuf := NewLimitedBuffer(MaxLogBufferBytes)
+	stderrBuf := NewLimitedBuffer(MaxLogBufferBytes)
+
 	cmd := exec.CommandContext(execCtx, "sh", "-c", cmdStr)
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	cmd.Dir = filepath.Dir(inputPath)
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 
 	err := cmd.Run()
 	combinedLogs := fmt.Sprintf("STDOUT:\n%s\nSTDERR:\n%s", stdoutBuf.String(), stderrBuf.String())
 
 	if execCtx.Err() == context.DeadlineExceeded {
-		return combinedLogs, fmt.Errorf("conversion timed out after 120 seconds")
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return combinedLogs, fmt.Errorf("conversion timed out after %v", ExecutionTimeout)
 	}
 
 	if err != nil {
