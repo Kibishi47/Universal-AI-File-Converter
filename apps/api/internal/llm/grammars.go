@@ -2,11 +2,11 @@ package llm
 
 // GBNF grammar definitions for strict structured llama.cpp decoding
 
-// GrammarFeasibility forces JSON: { "convertible": bool, "reason": string }
+// GrammarFeasibility forces strict JSON: { "convertible": bool, "reason": string }
 const GrammarFeasibility = `root ::= "{" ws "\"convertible\":" ws boolean "," ws "\"reason\":" ws string "}"
 boolean ::= "true" | "false"
-string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
-ws ::= [ \t\n\r]*`
+ws ::= [ \t\n]*
+string ::= "\"" [^"\\]* "\""`
 
 // GrammarTools forces JSON: { "required_tools": string[], "alternatives": string[] }
 const GrammarTools = `root ::= "{" ws "\"required_tools\":" ws stringlist "," ws "\"alternatives\":" ws stringlist "}"

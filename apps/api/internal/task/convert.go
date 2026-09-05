@@ -79,16 +79,19 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 
 	feasibility, err := h.llm.CheckFeasibility(ctx, p.OriginalName, fileSize, p.DetectedMime, p.DetectedExt, p.TargetExt)
 	if err != nil {
-		log.Printf("[Worker Task] Feasibility check error: %v, continuing with fallback", err)
-	} else if !feasibility.Convertible {
-		// Stop immediately without heating CPU
+		log.Printf("[Worker Task] Feasibility check failed (timeout/error): %v", err)
+		h.publishError(ctx, &p, "Délai d'analyse dépassé")
+		return asynq.SkipRetry
+	}
+	if !feasibility.Convertible {
+		// Stop immediately without heating CPU or retrying in Redis
 		reason := "La conversion entre ces formats n'est pas possible."
 		if feasibility.Reason != "" {
 			reason = feasibility.Reason
 		}
 		log.Printf("[Worker Task] Incompatible formats rejected: %s", reason)
 		h.publishError(ctx, &p, reason)
-		return nil
+		return asynq.SkipRetry
 	}
 
 	// ==========================================

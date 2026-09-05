@@ -57,23 +57,31 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint
-func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string) (string, error) {
+// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint and enforces a 15s timeout and token limit
+func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string, maxTokens int) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Enforce 15-second contextual timeout per inference request
+	infCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	if maxTokens <= 0 {
+		maxTokens = 256
+	}
 
 	// First try llama.cpp native endpoint (/completion) which natively takes grammar
 	nativeReqBody := map[string]interface{}{
 		"prompt":      fmt.Sprintf("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", systemPrompt, userPrompt),
 		"grammar":     grammar,
 		"temperature": 0.1,
-		"n_predict":   1024,
+		"n_predict":   maxTokens,
 	}
 
 	bodyBytes, err := json.Marshal(nativeReqBody)
 	if err == nil {
 		endpoint := fmt.Sprintf("%s/completion", c.baseURL)
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+		req, reqErr := http.NewRequestWithContext(infCtx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 		if reqErr == nil {
 			req.Header.Set("Content-Type", "application/json")
 			resp, doErr := c.httpClient.Do(req)
@@ -100,6 +108,8 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 		},
 		"grammar":     grammar,
 		"temperature": 0.1,
+		"max_tokens":  maxTokens,
+		"n_predict":   maxTokens,
 	}
 
 	chatBytes, err := json.Marshal(chatReqBody)
@@ -108,7 +118,7 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 	}
 
 	chatEndpoint := fmt.Sprintf("%s/v1/chat/completions", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatEndpoint, bytes.NewReader(chatBytes))
+	req, err := http.NewRequestWithContext(infCtx, http.MethodPost, chatEndpoint, bytes.NewReader(chatBytes))
 	if err != nil {
 		return "", fmt.Errorf("failed to create chat grammar request: %w", err)
 	}
@@ -146,7 +156,7 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 
 // CheckFeasibility (Phase 1) checks if the file can be converted to the target format
 func (c *Client) CheckFeasibility(ctx context.Context, originalName string, size int64, detectedMime, detectedExt, targetExt string) (*FeasibilityResult, error) {
-	systemPrompt := `You are an expert technical file converter. Determine if source file can be technically converted to target format. Return strictly a JSON object adhering to the grammar.`
+	systemPrompt := `You are a strict file format conversion validator. A conversion is ONLY convertible=true if standard conversion pipelines exist for direct, meaningful transformation without hallucinating data. Static images to video (like JPG to MP4) without an explicit audio track or animation request must be marked convertible=false. Output JSON only matching the grammar.`
 	userPrompt := fmt.Sprintf(`Source File: %s
 File Size: %d bytes
 Detected MIME: %s
@@ -155,7 +165,7 @@ Target Extension: %s
 
 Can this source format technically be converted or exported to the target extension?`, originalName, size, detectedMime, detectedExt, targetExt)
 
-	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarFeasibility)
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarFeasibility, 256)
 	if err != nil {
 		// Fallback to rule engine check
 		fb, fbErr := FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt, nil)
@@ -183,7 +193,7 @@ Target Extension: %s
 
 What CLI tools are needed to perform this conversion? Examples of binaries: ffmpeg, pandoc, libreoffice, vips, pdftoppm, gs, convert, magick.`, sourceExt, targetExt)
 
-	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarTools)
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarTools, 256)
 	if err != nil {
 		// Fallback to rule engine tool
 		fb, fbErr := FallbackRuleEngine("input."+sourceExt, "", sourceExt, targetExt, nil)
@@ -213,7 +223,7 @@ Previous error feedback (if any): %s
 
 Generate steps with command (the binary name) and args array.`, sourceExt, targetExt, strings.Join(availableTools, ", "), errorFeedback)
 
-	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExecution)
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExecution, 512)
 	if err != nil {
 		// Fallback to rule engine
 		fb, fbErr := FallbackRuleEngine("input."+sourceExt, "", sourceExt, targetExt, availableTools)
