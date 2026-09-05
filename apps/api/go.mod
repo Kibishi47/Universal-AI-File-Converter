@@ -1,4 +1,4 @@
-module file-converter-api
+module github.com/Kibishi47/Universal-AI-File-Converter/apps/api
 
 go 1.23.0
 

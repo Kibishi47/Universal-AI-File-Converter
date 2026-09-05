@@ -14,12 +14,12 @@ import (
 
 	"github.com/hibiken/asynq"
 
-	"file-converter-api/internal/config"
-	"file-converter-api/internal/github"
-	"file-converter-api/internal/llm"
-	"file-converter-api/internal/queue"
-	"file-converter-api/internal/runner"
-	"file-converter-api/internal/storage"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/config"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/github"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/llm"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/queue"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/runner"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/storage"
 )
 
 type Worker struct {

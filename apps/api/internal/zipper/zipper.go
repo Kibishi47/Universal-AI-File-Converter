@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	"file-converter-api/internal/storage"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/storage"
 )
 
 type FileEntry struct {

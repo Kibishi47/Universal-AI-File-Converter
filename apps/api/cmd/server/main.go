@@ -15,11 +15,11 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 
-	"file-converter-api/internal/config"
-	"file-converter-api/internal/detector"
-	"file-converter-api/internal/queue"
-	"file-converter-api/internal/storage"
-	"file-converter-api/internal/zipper"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/config"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/detector"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/queue"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/storage"
+	"github.com/Kibishi47/Universal-AI-File-Converter/apps/api/internal/zipper"
 )
 
 type Server struct {
