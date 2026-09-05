@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -75,6 +76,7 @@ func main() {
 	})
 
 	r.Route("/api", func(api chi.Router) {
+		api.Post("/session", srv.handleCreateSession)
 		api.Post("/upload", srv.handleUpload)
 		api.Get("/events/{session_uuid}", srv.handleEvents)
 		api.Get("/download/{file_id}", srv.handleDownload)
@@ -88,7 +90,39 @@ func main() {
 	}
 }
 
+var uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+
+func isValidUUIDv4(u string) bool {
+	return uuidRegex.MatchString(u)
+}
+
+type JSONErrorResponse struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+func writeJSONError(w http.ResponseWriter, status int, userMsg, code string, internalErr error) {
+	if internalErr != nil {
+		log.Printf("[ERROR] [%s] %s: %v", code, userMsg, internalErr)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(JSONErrorResponse{
+		Error: userMsg,
+		Code:  code,
+	})
+}
+
+func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	newUUID := uuid.New().String()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"session_uuid": newUUID,
+	})
+}
+
 type UploadResponse struct {
+	SessionUUID  string `json:"session_uuid"`
 	FileID       string `json:"file_id"`
 	OriginalName string `json:"original_name"`
 	DetectedMime string `json:"detected_mime"`
@@ -102,13 +136,20 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 
 	if err := r.ParseMultipartForm(maxBytes); err != nil {
-		http.Error(w, fmt.Sprintf("File too large or invalid multipart form: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Le fichier est trop volumineux ou le formulaire est invalide.", "INVALID_FORM", err)
 		return
 	}
 
-	sessionUUID := r.FormValue("session_uuid")
+	sessionUUID := strings.TrimSpace(r.FormValue("session_uuid"))
 	if sessionUUID == "" {
+		sessionUUID = strings.TrimSpace(r.Header.Get("X-Session-UUID"))
+	}
+	if sessionUUID == "" {
+		// Auto-generate session UUID on the server
 		sessionUUID = uuid.New().String()
+	} else if !isValidUUIDv4(sessionUUID) {
+		writeJSONError(w, http.StatusBadRequest, "L'identifiant de session fourni est invalide.", "INVALID_SESSION_UUID", fmt.Errorf("invalid uuid: %s", sessionUUID))
+		return
 	}
 
 	targetExt := strings.ToLower(strings.TrimSpace(r.FormValue("target_ext")))
@@ -118,7 +159,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Missing file in form field 'file': %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Aucun fichier valide fourni.", "MISSING_FILE", err)
 		return
 	}
 	defer file.Close()
@@ -126,7 +167,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// 1. Detect format using magic bytes
 	detectedInfo, multiReader, err := detector.Detect(file, header.Filename)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to inspect file: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Une erreur inattendue est survenue", "INTERNAL_ERROR", fmt.Errorf("detector error: %w", err))
 		return
 	}
 
@@ -137,7 +178,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// 2. Upload to SeaweedFS (S3)
 	if s.store != nil {
 		if err := s.store.Upload(r.Context(), storageKeyIn, multiReader, header.Size, detectedInfo.MIME); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to store file: %v", err), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "Une erreur inattendue est survenue", "INTERNAL_ERROR", fmt.Errorf("s3 upload error: %w", err))
 			return
 		}
 	}
@@ -155,7 +196,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.queue.EnqueueConversion(taskPayload); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to enqueue conversion: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Une erreur inattendue est survenue", "INTERNAL_ERROR", fmt.Errorf("queue enqueue error: %w", err))
 		return
 	}
 
@@ -193,9 +234,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	sessionUUID := chi.URLParam(r, "session_uuid")
-	if sessionUUID == "" {
-		http.Error(w, "session_uuid parameter required", http.StatusBadRequest)
+	sessionUUID := strings.TrimSpace(chi.URLParam(r, "session_uuid"))
+	if sessionUUID == "" || !isValidUUIDv4(sessionUUID) {
+		writeJSONError(w, http.StatusBadRequest, "L'identifiant de session est manquant ou invalide.", "INVALID_SESSION_UUID", fmt.Errorf("invalid session_uuid: %s", sessionUUID))
 		return
 	}
 
@@ -206,7 +247,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Une erreur inattendue est survenue", "STREAMING_UNSUPPORTED", fmt.Errorf("flusher unsupported"))
 		return
 	}
 
@@ -239,9 +280,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	fileID := chi.URLParam(r, "file_id")
-	if fileID == "" {
-		http.Error(w, "file_id required", http.StatusBadRequest)
+	fileID := strings.TrimSpace(chi.URLParam(r, "file_id"))
+	if fileID == "" || !isValidUUIDv4(fileID) {
+		writeJSONError(w, http.StatusBadRequest, "Identifiant de fichier invalide.", "INVALID_FILE_ID", fmt.Errorf("invalid file_id: %s", fileID))
 		return
 	}
 
@@ -249,7 +290,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	metaKey := fmt.Sprintf("file_meta:%s", fileID)
 	data, err := s.queue.GetRedisClient().Get(r.Context(), metaKey).Result()
 	if err != nil {
-		http.Error(w, "File not found or expired", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Fichier introuvable ou expiré.", "FILE_NOT_FOUND", err)
 		return
 	}
 
@@ -259,20 +300,20 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		TargetMime    string `json:"target_mime"`
 	}
 	if err := json.Unmarshal([]byte(data), &meta); err != nil {
-		http.Error(w, "Invalid file metadata", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Une erreur inattendue est survenue", "INTERNAL_ERROR", fmt.Errorf("invalid file metadata: %w", err))
 		return
 	}
 
 	obj, err := s.store.Download(r.Context(), meta.StorageKeyOut)
 	if err != nil {
-		http.Error(w, "File not available on storage", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Fichier indisponible sur le stockage.", "STORAGE_FILE_NOT_FOUND", err)
 		return
 	}
 	defer obj.Close()
 
 	stat, err := obj.Stat()
 	if err != nil {
-		http.Error(w, "Unable to inspect stored file", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Une erreur inattendue est survenue", "INTERNAL_ERROR", fmt.Errorf("failed to inspect stored file: %w", err))
 		return
 	}
 
@@ -292,16 +333,16 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownloadZip(w http.ResponseWriter, r *http.Request) {
-	sessionUUID := r.URL.Query().Get("session")
-	if sessionUUID == "" {
-		http.Error(w, "session query parameter required", http.StatusBadRequest)
+	sessionUUID := strings.TrimSpace(r.URL.Query().Get("session"))
+	if sessionUUID == "" || !isValidUUIDv4(sessionUUID) {
+		writeJSONError(w, http.StatusBadRequest, "L'identifiant de session est manquant ou invalide.", "INVALID_SESSION_UUID", fmt.Errorf("invalid session query: %s", sessionUUID))
 		return
 	}
 
 	sessionFileKey := fmt.Sprintf("session_files:%s", sessionUUID)
 	rawEntries, err := s.queue.GetRedisClient().SMembers(r.Context(), sessionFileKey).Result()
 	if err != nil || len(rawEntries) == 0 {
-		http.Error(w, "No files found for this session", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Aucun fichier converti trouvé pour cette session.", "NO_SESSION_FILES", err)
 		return
 	}
 
@@ -323,7 +364,7 @@ func (s *Server) handleDownloadZip(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(zipEntries) == 0 {
-		http.Error(w, "No converted files ready for download yet", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Aucun fichier prêt pour le téléchargement.", "FILES_NOT_READY", nil)
 		return
 	}
 
@@ -331,6 +372,6 @@ func (s *Server) handleDownloadZip(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"converted_files_%s.zip\"", sessionUUID[:8]))
 
 	if err := zipper.StreamZip(r.Context(), s.store, zipEntries, w); err != nil {
-		log.Printf("Error streaming zip: %v", err)
+		log.Printf("[ERROR] [ZIP_STREAM_ERROR] Error streaming zip archive for session %s: %v", sessionUUID, err)
 	}
 }
