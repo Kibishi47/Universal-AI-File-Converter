@@ -109,7 +109,7 @@ Coolify permet de gérer l'orchestration Docker facilement sur un VPS Debian/Ubu
 
 ### Étape 2 : Déployer le conteneur LLM (`llama.cpp:server`)
 1. Ajoutez une ressource de type **Docker Image** :
-   - Image : `ghcr.io/ggerganov/llama.cpp:server`
+   - Image : `ghcr.io/ggerganov/llama.cpp:server-cpu`
 2. **Configuration du volume hôte :**
    - Créez un dossier sur votre VPS (ex: `/var/data/models`) et téléchargez-y votre modèle GGUF :
      ```bash
