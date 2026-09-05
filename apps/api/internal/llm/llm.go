@@ -11,6 +11,25 @@ import (
 	"time"
 )
 
+type FeasibilityResult struct {
+	Convertible bool   `json:"convertible"`
+	Reason      string `json:"reason"`
+}
+
+type ToolsResult struct {
+	RequiredTools []string `json:"required_tools"`
+	Alternatives  []string `json:"alternatives"`
+}
+
+type ExecutionStep struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
+type ExecutionPlan struct {
+	Steps []ExecutionStep `json:"steps"`
+}
+
 type DecisionResponse struct {
 	DetectedMime    string  `json:"detected_mime"`
 	IsConvertible   bool    `json:"is_convertible"`
@@ -36,91 +55,69 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-// PlanConversion asks llama.cpp:server using json_schema in response_format to generate a guaranteed JSON response
-func (c *Client) PlanConversion(ctx context.Context, originalName, detectedMime, detectedExt, targetExt string, installedTools []string) (*DecisionResponse, error) {
-	systemPrompt := `You are an expert file conversion CLI orchestrator.
-Analyze the source file metadata and target extension.
-Determine whether a technical conversion is feasible.
-You must choose the best CLI tool to convert the file from source format to target format.
-Use '{{input}}' and '{{output}}' as placeholders in the command_template.
-If a tool is present in the list of installed tools, mark tool_installed as true, otherwise false.
-Output strictly valid JSON matching the schema provided.`
-
-	userPrompt := fmt.Sprintf(`Source File: %s
-Detected MIME: %s
-Source Extension: %s
-Target Extension: %s
-Installed Tools in Container: [%s]
-
-Determine technical feasibility, required tool (e.g. ffmpeg, pandoc, libreoffice, vips, pdftoppm, gs, convert/imagemagick, etc.), check if it is in Installed Tools, and generate the exact CLI command template using {{input}} and {{output}}.`,
-		originalName, detectedMime, detectedExt, targetExt, strings.Join(installedTools, ", "))
-
-	schema := map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"detected_mime": map[string]interface{}{
-				"type": "string",
-			},
-			"is_convertible": map[string]interface{}{
-				"type": "boolean",
-			},
-			"rejection_reason": map[string]interface{}{
-				"type": []string{"string", "null"},
-			},
-			"required_tool": map[string]interface{}{
-				"type": "string",
-			},
-			"tool_installed": map[string]interface{}{
-				"type": "boolean",
-			},
-			"command_template": map[string]interface{}{
-				"type": "string",
-			},
-		},
-		"required": []string{"detected_mime", "is_convertible", "rejection_reason", "required_tool", "tool_installed", "command_template"},
-		"additionalProperties": false,
+// CompleteWithGrammar queries llama.cpp with a GBNF grammar constraint
+func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userPrompt, grammar string) (string, error) {
+	// First try llama.cpp native endpoint (/completion) which natively takes grammar
+	nativeReqBody := map[string]interface{}{
+		"prompt":      fmt.Sprintf("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", systemPrompt, userPrompt),
+		"grammar":     grammar,
+		"temperature": 0.1,
+		"n_predict":   1024,
 	}
 
-	reqBody := map[string]interface{}{
+	bodyBytes, err := json.Marshal(nativeReqBody)
+	if err == nil {
+		endpoint := fmt.Sprintf("%s/completion", c.baseURL)
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+		if reqErr == nil {
+			req.Header.Set("Content-Type", "application/json")
+			resp, doErr := c.httpClient.Do(req)
+			if doErr == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					var comp struct {
+						Content string `json:"content"`
+					}
+					if err := json.NewDecoder(resp.Body).Decode(&comp); err == nil && comp.Content != "" {
+						return strings.TrimSpace(comp.Content), nil
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to OpenAI-compatible /v1/chat/completions with grammar parameter
+	chatReqBody := map[string]interface{}{
 		"model": c.model,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userPrompt},
 		},
+		"grammar":     grammar,
 		"temperature": 0.1,
-		"response_format": map[string]interface{}{
-			"type": "json_object",
-			"schema": schema,
-		},
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
+	chatBytes, err := json.Marshal(chatReqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal llm request: %w", err)
+		return "", fmt.Errorf("failed to marshal chat grammar request: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/v1/chat/completions", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	chatEndpoint := fmt.Sprintf("%s/v1/chat/completions", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatEndpoint, bytes.NewReader(chatBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create llm request: %w", err)
+		return "", fmt.Errorf("failed to create chat grammar request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// Fallback to deterministic rule engine if LLM server is unreachable
-		return FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt, installedTools)
+		return "", fmt.Errorf("llm grammar request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respData, _ := io.ReadAll(resp.Body)
-		// Fallback if LLM server returned error (e.g. model still loading)
-		fallback, fbErr := FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt, installedTools)
-		if fbErr == nil {
-			return fallback, nil
-		}
-		return nil, fmt.Errorf("llm request failed with status %d: %s", resp.StatusCode, string(respData))
+		return "", fmt.Errorf("llm grammar response status %d: %s", resp.StatusCode, string(respData))
 	}
 
 	var chatCompletion struct {
@@ -132,23 +129,163 @@ Determine technical feasibility, required tool (e.g. ffmpeg, pandoc, libreoffice
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&chatCompletion); err != nil {
-		return nil, fmt.Errorf("failed to decode llm response: %w", err)
+		return "", fmt.Errorf("failed to decode chat grammar response: %w", err)
 	}
 
 	if len(chatCompletion.Choices) == 0 {
-		return nil, fmt.Errorf("no completion choices returned by llm")
+		return "", fmt.Errorf("empty choices from llm grammar response")
 	}
 
-	content := strings.TrimSpace(chatCompletion.Choices[0].Message.Content)
-	var decision DecisionResponse
-	if err := json.Unmarshal([]byte(content), &decision); err != nil {
-		return nil, fmt.Errorf("failed to parse structured decision JSON: %w (content: %s)", err, content)
-	}
-
-	return &decision, nil
+	return strings.TrimSpace(chatCompletion.Choices[0].Message.Content), nil
 }
 
-// FallbackRuleEngine provides high-reliability deterministic CLI templates for common conversions
+// CheckFeasibility (Phase 1) checks if the file can be converted to the target format
+func (c *Client) CheckFeasibility(ctx context.Context, originalName string, size int64, detectedMime, detectedExt, targetExt string) (*FeasibilityResult, error) {
+	systemPrompt := `You are an expert technical file converter. Determine if source file can be technically converted to target format. Return strictly a JSON object adhering to the grammar.`
+	userPrompt := fmt.Sprintf(`Source File: %s
+File Size: %d bytes
+Detected MIME: %s
+Source Extension: %s
+Target Extension: %s
+
+Can this source format technically be converted or exported to the target extension?`, originalName, size, detectedMime, detectedExt, targetExt)
+
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarFeasibility)
+	if err != nil {
+		// Fallback to rule engine check
+		fb, fbErr := FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt, nil)
+		if fbErr == nil {
+			return &FeasibilityResult{
+				Convertible: fb.IsConvertible,
+				Reason:      "Rule engine deterministic analysis",
+			}, nil
+		}
+		return nil, err
+	}
+
+	var res FeasibilityResult
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return nil, fmt.Errorf("failed to parse feasibility json: %w (raw: %s)", err, raw)
+	}
+	return &res, nil
+}
+
+// DiscoverTools (Phase 2) discovers required CLI tools and possible alternatives
+func (c *Client) DiscoverTools(ctx context.Context, sourceExt, targetExt string) (*ToolsResult, error) {
+	systemPrompt := `You are an expert system administrator for CLI file conversion. Identify the required CLI tools (binary names) and alternatives to convert the source extension to target extension. Return strictly a JSON object adhering to the grammar.`
+	userPrompt := fmt.Sprintf(`Source Extension: %s
+Target Extension: %s
+
+What CLI tools are needed to perform this conversion? Examples of binaries: ffmpeg, pandoc, libreoffice, vips, pdftoppm, gs, convert, magick.`, sourceExt, targetExt)
+
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarTools)
+	if err != nil {
+		// Fallback to rule engine tool
+		fb, fbErr := FallbackRuleEngine("input."+sourceExt, "", sourceExt, targetExt, nil)
+		if fbErr == nil && fb.RequiredTool != "" {
+			return &ToolsResult{
+				RequiredTools: []string{fb.RequiredTool},
+				Alternatives:  []string{},
+			}, nil
+		}
+		return nil, err
+	}
+
+	var res ToolsResult
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return nil, fmt.Errorf("failed to parse tools json: %w (raw: %s)", err, raw)
+	}
+	return &res, nil
+}
+
+// SynthesizePlan (Phase 3) generates the exact bash command steps
+func (c *Client) SynthesizePlan(ctx context.Context, sourceExt, targetExt string, availableTools []string, errorFeedback string) (*ExecutionPlan, error) {
+	systemPrompt := `You are an expert command line synthesizer. Generate the exact execution steps to convert a file from source to target. Use $INPUT as placeholder for the source file and $OUTPUT for the destination file. Return strictly a JSON object adhering to the grammar.`
+	userPrompt := fmt.Sprintf(`Source Extension: %s
+Target Extension: %s
+Available CLI tools on system: [%s]
+Previous error feedback (if any): %s
+
+Generate steps with command (the binary name) and args array.`, sourceExt, targetExt, strings.Join(availableTools, ", "), errorFeedback)
+
+	raw, err := c.CompleteWithGrammar(ctx, systemPrompt, userPrompt, GrammarExecution)
+	if err != nil {
+		// Fallback to rule engine
+		fb, fbErr := FallbackRuleEngine("input."+sourceExt, "", sourceExt, targetExt, availableTools)
+		if fbErr == nil {
+			parts := strings.Fields(fb.CommandTemplate)
+			if len(parts) > 0 {
+				var args []string
+				for _, p := range parts[1:] {
+					p = strings.ReplaceAll(p, "{{input}}", "$INPUT")
+					p = strings.ReplaceAll(p, "{{output}}", "$OUTPUT")
+					args = append(args, p)
+				}
+				return &ExecutionPlan{
+					Steps: []ExecutionStep{
+						{Command: parts[0], Args: args},
+					},
+				}, nil
+			}
+		}
+		return nil, err
+	}
+
+	var res ExecutionPlan
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return nil, fmt.Errorf("failed to parse execution plan json: %w (raw: %s)", err, raw)
+	}
+	return &res, nil
+}
+
+// PlanConversion backward compatibility method
+func (c *Client) PlanConversion(ctx context.Context, originalName, detectedMime, detectedExt, targetExt string, installedTools []string) (*DecisionResponse, error) {
+	feas, err := c.CheckFeasibility(ctx, originalName, 0, detectedMime, detectedExt, targetExt)
+	if err != nil || !feas.Convertible {
+		reason := "Format conversion not supported"
+		if feas != nil && feas.Reason != "" {
+			reason = feas.Reason
+		}
+		return &DecisionResponse{
+			DetectedMime:    detectedMime,
+			IsConvertible:   false,
+			RejectionReason: &reason,
+		}, nil
+	}
+
+	tools, err := c.DiscoverTools(ctx, detectedExt, targetExt)
+	reqTool := "pandoc"
+	if err == nil && len(tools.RequiredTools) > 0 {
+		reqTool = tools.RequiredTools[0]
+	}
+
+	toolInstalled := false
+	for _, it := range installedTools {
+		if strings.EqualFold(it, reqTool) {
+			toolInstalled = true
+			break
+		}
+	}
+
+	plan, err := c.SynthesizePlan(ctx, detectedExt, targetExt, installedTools, "")
+	cmdTemplate := fmt.Sprintf("%s {{input}} {{output}}", reqTool)
+	if err == nil && len(plan.Steps) > 0 {
+		step := plan.Steps[0]
+		cmdTemplate = step.Command + " " + strings.Join(step.Args, " ")
+		cmdTemplate = strings.ReplaceAll(cmdTemplate, "$INPUT", "{{input}}")
+		cmdTemplate = strings.ReplaceAll(cmdTemplate, "$OUTPUT", "{{output}}")
+	}
+
+	return &DecisionResponse{
+		DetectedMime:    detectedMime,
+		IsConvertible:   true,
+		RequiredTool:    reqTool,
+		ToolInstalled:   toolInstalled,
+		CommandTemplate: cmdTemplate,
+	}, nil
+}
+
+// FallbackRuleEngine provides deterministic templates for offline or fallback conversion
 func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt string, installedTools []string) (*DecisionResponse, error) {
 	src := strings.ToLower(detectedExt)
 	tgt := strings.ToLower(targetExt)
@@ -166,11 +303,9 @@ func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt strin
 	var cmd string
 
 	switch {
-	// Audio / Video conversions
 	case isMedia(src) && isMedia(tgt):
 		tool = "ffmpeg"
 		cmd = "ffmpeg -y -i {{input}} {{output}}"
-	// Documents (Office / PDF / Text)
 	case (src == "docx" || src == "doc" || src == "odt" || src == "rtf" || src == "txt") && tgt == "pdf":
 		tool = "libreoffice"
 		cmd = "libreoffice --headless --convert-to pdf {{input}} --outdir $(dirname {{output}})"
@@ -180,20 +315,16 @@ func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt strin
 	case (src == "pptx" || src == "ppt" || src == "odp") && tgt == "pdf":
 		tool = "libreoffice"
 		cmd = "libreoffice --headless --convert-to pdf {{input}} --outdir $(dirname {{output}})"
-	// Pandoc documents / markdown
 	case (src == "md" || src == "markdown" || src == "html" || src == "rst") && (tgt == "html" || tgt == "docx" || tgt == "pdf" || tgt == "md" || tgt == "txt"):
 		tool = "pandoc"
 		cmd = "pandoc {{input}} -o {{output}}"
-	// Images (vips or imagemagick)
 	case isImage(src) && isImage(tgt):
 		tool = "vips"
 		cmd = "vips copy {{input}} {{output}}"
-	// PDF to image
 	case src == "pdf" && isImage(tgt):
 		tool = "pdftoppm"
 		cmd = fmt.Sprintf("pdftoppm -%s -r 150 {{input}} $(dirname {{output}})/page", tgt)
 	default:
-		// Attempt pandoc or ffmpeg or fail
 		tool = "pandoc"
 		cmd = "pandoc {{input}} -o {{output}}"
 	}
