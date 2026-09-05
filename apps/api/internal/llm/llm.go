@@ -156,7 +156,24 @@ func (c *Client) CompleteWithGrammar(ctx context.Context, systemPrompt, userProm
 
 // CheckFeasibility (Phase 1) checks if the file can be converted to the target format
 func (c *Client) CheckFeasibility(ctx context.Context, originalName string, size int64, detectedMime, detectedExt, targetExt string) (*FeasibilityResult, error) {
-	systemPrompt := `You are a strict file format conversion validator. A conversion is ONLY convertible=true if standard conversion pipelines exist for direct, meaningful transformation without hallucinating data. Static images to video (like JPG to MP4) without an explicit audio track or animation request must be marked convertible=false. Output JSON only matching the grammar.`
+	systemPrompt := `You are a strict media-type feasibility evaluator.
+Rule: A direct file conversion is ONLY feasible (convertible=true) if source and target formats belong to the SAME media category:
+
+Image to Image (e.g. JPG to WEBP, PNG to SVG, TIFF to JPG) -> TRUE
+Video to Video (e.g. MKV to MP4, AVI to WEBM) -> TRUE
+Video to Audio extraction (e.g. MP4 to MP3, MKV to WAV) -> TRUE
+Audio to Audio (e.g. WAV to MP3, FLAC to OGG) -> TRUE
+Document to Document (e.g. DOCX to PDF, MD to HTML, TXT to PDF) -> TRUE
+Archive to Archive (e.g. TAR to ZIP) -> TRUE
+
+STRICT FORBIDDEN CASES (MUST RETURN convertible=false):
+Static Image to Video (e.g. JPG to MP4, PNG to MKV) -> FALSE (a single still image is not a video stream)
+Static Image to Audio (e.g. JPG to MP3, PNG to WAV) -> FALSE
+Audio to Video (without dedicated visualizer) -> FALSE
+Audio to Image -> FALSE
+
+If convertible=false, provide a concise user-friendly reason (e.g. 'Cannot convert a static image into a video file').
+Respond strictly using the JSON grammar.`
 	userPrompt := fmt.Sprintf(`Source File: %s
 File Size: %d bytes
 Detected MIME: %s
@@ -318,6 +335,34 @@ func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt strin
 	var cmd string
 
 	switch {
+	case isImage(src) && isVideo(tgt):
+		reason := "Cannot convert a static image into a video file"
+		return &DecisionResponse{
+			DetectedMime:    detectedMime,
+			IsConvertible:   false,
+			RejectionReason: &reason,
+		}, nil
+	case isImage(src) && isAudio(tgt):
+		reason := "Cannot convert an image into an audio file"
+		return &DecisionResponse{
+			DetectedMime:    detectedMime,
+			IsConvertible:   false,
+			RejectionReason: &reason,
+		}, nil
+	case isAudio(src) && isVideo(tgt):
+		reason := "Cannot convert an audio file into a video file without dedicated visualizer"
+		return &DecisionResponse{
+			DetectedMime:    detectedMime,
+			IsConvertible:   false,
+			RejectionReason: &reason,
+		}, nil
+	case isAudio(src) && isImage(tgt):
+		reason := "Cannot convert an audio file into an image"
+		return &DecisionResponse{
+			DetectedMime:    detectedMime,
+			IsConvertible:   false,
+			RejectionReason: &reason,
+		}, nil
 	case isMedia(src) && isMedia(tgt):
 		tool = "ffmpeg"
 		cmd = "ffmpeg -y -i {{input}} {{output}}"
@@ -339,6 +384,9 @@ func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt strin
 	case src == "pdf" && isImage(tgt):
 		tool = "pdftoppm"
 		cmd = fmt.Sprintf("pdftoppm -%s -r 150 {{input}} $(dirname {{output}})/page", tgt)
+	case isArchive(src) && isArchive(tgt):
+		tool = "tar"
+		cmd = "tar -czvf {{output}} {{input}}"
 	default:
 		tool = "pandoc"
 		cmd = "pandoc {{input}} -o {{output}}"
@@ -355,9 +403,33 @@ func FallbackRuleEngine(originalName, detectedMime, detectedExt, targetExt strin
 }
 
 func isMedia(ext string) bool {
-	media := []string{"mp4", "mkv", "avi", "mov", "webm", "mp3", "wav", "flac", "aac", "ogg", "m4a"}
-	for _, m := range media {
-		if ext == m {
+	return isVideo(ext) || isAudio(ext)
+}
+
+func isVideo(ext string) bool {
+	videos := []string{"mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v"}
+	for _, v := range videos {
+		if ext == v {
+			return true
+		}
+	}
+	return false
+}
+
+func isAudio(ext string) bool {
+	audios := []string{"mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus"}
+	for _, a := range audios {
+		if ext == a {
+			return true
+		}
+	}
+	return false
+}
+
+func isArchive(ext string) bool {
+	archives := []string{"tar", "zip", "gz", "bz2", "xz", "7z", "rar"}
+	for _, a := range archives {
+		if ext == a {
 			return true
 		}
 	}

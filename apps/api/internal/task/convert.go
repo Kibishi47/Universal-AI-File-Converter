@@ -186,6 +186,28 @@ func (h *ConversionHandler) Handle(ctx context.Context, t *asynq.Task) error {
 	// Also append any preinstalled system tools
 	availableTools = append(availableTools, h.runner.ListInstalledTools()...)
 
+	// If tools were specifically identified but none are available and dynamic installation failed
+	if len(candidateTools) > 0 {
+		hasUsableTool := false
+		for _, ct := range candidateTools {
+			for _, at := range availableTools {
+				if strings.EqualFold(ct, at) {
+					hasUsableTool = true
+					break
+				}
+			}
+			if hasUsableTool {
+				break
+			}
+		}
+		if !hasUsableTool {
+			errMsg := fmt.Sprintf("Aucun outil de conversion compatible n'est disponible (outils requis : %s)", strings.Join(candidateTools, ", "))
+			log.Printf("[Worker Task] %s", errMsg)
+			h.publishError(ctx, &p, errMsg)
+			return asynq.SkipRetry
+		}
+	}
+
 	// ==========================================
 	// Phase 3 & 4 : Plan Synthesis & Agentic Self-Correction Loop
 	// ==========================================
